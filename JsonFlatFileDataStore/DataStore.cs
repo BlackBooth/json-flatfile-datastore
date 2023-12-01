@@ -1,24 +1,20 @@
-﻿using Newtonsoft.Json;
-using Newtonsoft.Json.Converters;
-using Newtonsoft.Json.Linq;
-using Newtonsoft.Json.Serialization;
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Dynamic;
 using System.Globalization;
-using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Converters;
+using Newtonsoft.Json.Linq;
+using Newtonsoft.Json.Serialization;
 
 namespace JsonFlatFileDataStore
 {
     public class DataStore : IDataStore
     {
-        private const int CommitBatchMaxSize = 50;
-
         private readonly string _filePath;
         private readonly string _keyProperty;
         private readonly bool _reloadBeforeGetCollection;
@@ -27,14 +23,18 @@ namespace JsonFlatFileDataStore
         private readonly BlockingCollection<CommitAction> _updates = new BlockingCollection<CommitAction>();
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
         private readonly ExpandoObjectConverter _converter = new ExpandoObjectConverter();
-        private readonly JsonSerializerSettings _serializerSettings = new JsonSerializerSettings() { ContractResolver = new CamelCasePropertyNamesContractResolver() };
+
+        private readonly JsonSerializerSettings _serializerSettings = new JsonSerializerSettings()
+        { ContractResolver = new CamelCasePropertyNamesContractResolver() };
+
         private readonly Func<string, string> _encryptJson;
         private readonly Func<string, string> _decryptJson;
 
         private JObject _jsonData;
         private bool _executingJsonUpdate;
 
-        public DataStore(string path, bool useLowerCamelCase = true, string keyProperty = null, bool reloadBeforeGetCollection = false, string encryptionKey = null, bool minifyJson = false)
+        public DataStore(string path, bool useLowerCamelCase = true, string keyProperty = null, bool reloadBeforeGetCollection = false,
+            string encryptionKey = null, bool minifyJson = false)
         {
             _filePath = path;
 
@@ -42,25 +42,25 @@ namespace JsonFlatFileDataStore
             var usedFormatting = minifyJson || useEncryption ? Formatting.None : Formatting.Indented;
 
             _toJsonFunc = useLowerCamelCase
-                        ? new Func<JObject, string>(data =>
-                        {
-                            // Serializing JObject ignores SerializerSettings, so we have to first deserialize to ExpandoObject and then serialize
-                            // http://json.codeplex.com/workitem/23853
-                            var jObject = JsonConvert.DeserializeObject<ExpandoObject>(data.ToString());
-                            return JsonConvert.SerializeObject(jObject, usedFormatting, _serializerSettings);
-                        })
-                        : (s => s.ToString(usedFormatting));
+                ? new Func<JObject, string>(data =>
+                {
+                    // Serializing JObject ignores SerializerSettings, so we have to first deserialize to ExpandoObject and then serialize
+                    // http://json.codeplex.com/workitem/23853
+                    var jObject = JsonConvert.DeserializeObject<ExpandoObject>(data.ToString());
+                    return JsonConvert.SerializeObject(jObject, usedFormatting, _serializerSettings);
+                })
+                : (s => s.ToString(usedFormatting));
 
             _convertPathToCorrectCamelCase = useLowerCamelCase
-                                ? new Func<string, string>(s => string.Concat(s.Select((x, i) => i == 0 ? char.ToLower(x).ToString() : x.ToString())))
-                                : s => s;
+                ? new Func<string, string>(s => string.Concat(s.Select((x, i) => i == 0 ? char.ToLower(x).ToString() : x.ToString())))
+                : s => s;
 
             _keyProperty = keyProperty ?? (useLowerCamelCase ? "id" : "Id");
 
             _reloadBeforeGetCollection = reloadBeforeGetCollection;
 
             if (useEncryption)
-            {    
+            {
                 var aes256 = new Aes256();
                 _encryptJson = (json => aes256.Encrypt(json, encryptionKey));
                 _decryptJson = (json => aes256.Decrypt(json, encryptionKey));
@@ -71,68 +71,24 @@ namespace JsonFlatFileDataStore
                 _decryptJson = (json => json);
             }
 
-            _jsonData = JObject.Parse(ReadJsonFromFile(path));
+            _jsonData = GetJsonObjectFromFile();
 
             // Run updates on a background thread and use BlockingCollection to prevent multiple updates to run simultaneously
             Task.Run(() =>
             {
-                var token = _cts.Token;
-
-                var batch = new Queue<CommitAction>();
-                var callbacks = new Queue<(CommitAction action, bool success)>();
-
-                while (!token.IsCancellationRequested)
-                {
-                    batch.Clear();
-                    callbacks.Clear();
-
-                    var updateAction = _updates.Take(token);
-
-                    _executingJsonUpdate = true;
-
-                    batch.Enqueue(updateAction);
-
-                    while (_updates.Count > 0 && batch.Count < CommitBatchMaxSize)
+                CommitActionHandler.HandleStoreCommitActions(_cts.Token,
+                    _updates,
+                    executionState => _executingJsonUpdate = executionState,
+                    jsonText =>
                     {
-                        batch.Enqueue(_updates.Take(token));
-                    }
-
-                    var jsonText = ReadJsonFromFile(_filePath);
-
-                    foreach (var action in batch)
-                    {
-                        var (actionSuccess, updatedJson) = action.HandleAction(JObject.Parse(jsonText));
-
-                        callbacks.Enqueue((action, actionSuccess));
-
-                        if (actionSuccess)
-                            jsonText = updatedJson;
-                    }
-
-                    var writeSuccess = false;
-                    Exception actionException = null;
-
-                    try
-                    {
-                        writeSuccess = WriteJsonToFile(_filePath, jsonText);
-
                         lock (_jsonData)
                         {
                             _jsonData = JObject.Parse(jsonText);
                         }
-                    }
-                    catch (Exception e)
-                    {
-                        actionException = e;
-                    }
 
-                    foreach (var (cbAction, cbSuccess) in callbacks)
-                    {
-                        cbAction.Ready(writeSuccess ? cbSuccess : false, actionException);
-                    }
-
-                    _executingJsonUpdate = false;
-                }
+                        return FileAccess.WriteJsonToFile(_filePath, _encryptJson, jsonText);
+                    },
+                    GetJsonTextFromFile);
             });
         }
 
@@ -158,14 +114,14 @@ namespace JsonFlatFileDataStore
                 _jsonData = JObject.Parse(jsonData);
             }
 
-            WriteJsonToFile(_filePath, jsonData);
+            FileAccess.WriteJsonToFile(_filePath, _encryptJson, jsonData);
         }
 
         public void Reload()
         {
             lock (_jsonData)
             {
-                _jsonData = JObject.Parse(ReadJsonFromFile(_filePath));
+                _jsonData = GetJsonObjectFromFile();
             }
         }
 
@@ -174,10 +130,12 @@ namespace JsonFlatFileDataStore
             if (_reloadBeforeGetCollection)
             {
                 // This might be a bad idea especially if the file is in use, as this can take a long time
-                _jsonData = JObject.Parse(ReadJsonFromFile(_filePath));
+                _jsonData = GetJsonObjectFromFile();
             }
 
-            var token = _jsonData[key];
+            var convertedKey = _convertPathToCorrectCamelCase(key);
+
+            var token = _jsonData[convertedKey];
 
             if (token == null)
             {
@@ -197,10 +155,12 @@ namespace JsonFlatFileDataStore
             if (_reloadBeforeGetCollection)
             {
                 // This might be a bad idea especially if the file is in use, as this can take a long time
-                _jsonData = JObject.Parse(ReadJsonFromFile(_filePath));
+                _jsonData = GetJsonObjectFromFile();
             }
 
-            var token = _jsonData[key];
+            var convertedKey = _convertPathToCorrectCamelCase(key);
+
+            var token = _jsonData[convertedKey];
 
             if (token == null)
                 return null;
@@ -214,12 +174,14 @@ namespace JsonFlatFileDataStore
 
         private Task<bool> Insert<T>(string key, T item, bool isAsync = false)
         {
+            var convertedKey = _convertPathToCorrectCamelCase(key);
+
             (bool, JObject) UpdateAction()
             {
-                if (_jsonData[key] != null)
+                if (_jsonData[convertedKey] != null)
                     return (false, _jsonData);
 
-                _jsonData[key] = JToken.FromObject(item);
+                _jsonData[convertedKey] = JToken.FromObject(item);
                 return (true, _jsonData);
             }
 
@@ -232,12 +194,14 @@ namespace JsonFlatFileDataStore
 
         private Task<bool> Replace<T>(string key, T item, bool upsert = false, bool isAsync = false)
         {
+            var convertedKey = _convertPathToCorrectCamelCase(key);
+
             (bool, JObject) UpdateAction()
             {
-                if (_jsonData[key] == null && upsert == false)
+                if (_jsonData[convertedKey] == null && upsert == false)
                     return (false, _jsonData);
 
-                _jsonData[key] = JToken.FromObject(item);
+                _jsonData[convertedKey] = JToken.FromObject(item);
                 return (true, _jsonData);
             }
 
@@ -250,21 +214,23 @@ namespace JsonFlatFileDataStore
 
         private Task<bool> Update(string key, dynamic item, bool isAsync = false)
         {
+            var convertedKey = _convertPathToCorrectCamelCase(key);
+
             (bool, JObject) UpdateAction()
             {
-                if (_jsonData[key] == null)
+                if (_jsonData[convertedKey] == null)
                     return (false, _jsonData);
 
-                var toUpdate = SingleDynamicItemReadConverter(_jsonData[key]);
+                var toUpdate = SingleDynamicItemReadConverter(_jsonData[convertedKey]);
 
                 if (ObjectExtensions.IsReferenceType(item) && ObjectExtensions.IsReferenceType(toUpdate))
                 {
                     ObjectExtensions.CopyProperties(item, toUpdate);
-                    _jsonData[key] = JToken.FromObject(toUpdate);
+                    _jsonData[convertedKey] = JToken.FromObject(toUpdate);
                 }
                 else
                 {
-                    _jsonData[key] = JToken.FromObject(item);
+                    _jsonData[convertedKey] = JToken.FromObject(item);
                 }
 
                 return (true, _jsonData);
@@ -279,9 +245,11 @@ namespace JsonFlatFileDataStore
 
         private Task<bool> Delete(string key, bool isAsync = false)
         {
+            var convertedKey = _convertPathToCorrectCamelCase(key);
+
             (bool, JObject) UpdateAction()
             {
-                var result = _jsonData.Remove(key);
+                var result = _jsonData.Remove(convertedKey);
                 return (result, _jsonData);
             }
 
@@ -295,7 +263,7 @@ namespace JsonFlatFileDataStore
             var insertConvert = new Func<T, T>(e => e);
             var createNewInstance = new Func<T>(() => Activator.CreateInstance<T>());
 
-            return GetCollection(name ?? _convertPathToCorrectCamelCase(typeof(T).Name), readConvert, insertConvert, createNewInstance);
+            return GetCollection(name ?? typeof(T).Name, readConvert, insertConvert, createNewInstance);
         }
 
         public IDocumentCollection<dynamic> GetCollection(string name)
@@ -344,6 +312,8 @@ namespace JsonFlatFileDataStore
 
         private IDocumentCollection<T> GetCollection<T>(string path, Func<JToken, T> readConvert, Func<T, T> insertConvert, Func<T> createNewInstance)
         {
+            var pathWithConfiguredCase = _convertPathToCorrectCamelCase(path);
+
             var data = new Lazy<List<T>>(() =>
             {
                 lock (_jsonData)
@@ -351,21 +321,21 @@ namespace JsonFlatFileDataStore
                     if (_reloadBeforeGetCollection)
                     {
                         // This might be a bad idea especially if the file is in use, as this can take a long time
-                        _jsonData = JObject.Parse(ReadJsonFromFile(_filePath));
+                        _jsonData = GetJsonObjectFromFile();
                     }
 
-                    return _jsonData[path]?
-                                .Children()
-                                .Select(e => readConvert(e))
-                                .ToList()
-                                ?? new List<T>();
+                    return _jsonData[pathWithConfiguredCase]?
+                           .Children()
+                           .Select(e => readConvert(e))
+                           .ToList()
+                        ?? new List<T>();
                 }
             });
 
             return new DocumentCollection<T>(
                 (sender, dataToUpdate, isOperationAsync) => Commit(sender, dataToUpdate, isOperationAsync, readConvert),
                 data,
-                path,
+                pathWithConfiguredCase,
                 _keyProperty,
                 insertConvert,
                 createNewInstance);
@@ -393,10 +363,10 @@ namespace JsonFlatFileDataStore
                 var updatedJson = string.Empty;
 
                 var selectedData = currentJson[dataPath]?
-                                        .Children()
-                                        .Select(e => readConvert(e))
-                                        .ToList()
-                                        ?? new List<T>();
+                                   .Children()
+                                   .Select(e => readConvert(e))
+                                   .ToList()
+                                ?? new List<T>();
 
                 var success = commitOperation(selectedData);
 
@@ -462,61 +432,12 @@ namespace JsonFlatFileDataStore
             }
         }
 
-        private string ReadJsonFromFile(string path)
-        {
-            Stopwatch sw = null;
-            string json = "{}";
+        private string GetJsonTextFromFile() => FileAccess.ReadJsonFromFile(_filePath, _encryptJson, _decryptJson);
 
-            while (true)
-            {
-                try
-                {
-                    json = File.ReadAllText(path);
-                    break;
-                }
-                catch (FileNotFoundException)
-                {
-                    json = _encryptJson(json);
-                    File.WriteAllText(path, json);
-                    break;
-                }
-                catch (IOException e) when (e.Message.Contains("because it is being used by another process"))
-                {
-                    // If some other process is using this file, retry operation unless elapsed times is greater than 10sec
-                    sw = sw ?? Stopwatch.StartNew();
-                    if (sw.ElapsedMilliseconds > 10000)
-                        throw;
-                }
-            }
+        private JObject GetJsonObjectFromFile() => JObject.Parse(GetJsonTextFromFile());
 
-            return _decryptJson(json);
-        }
 
-        private bool WriteJsonToFile(string path, string content)
-        {
-            Stopwatch sw = null;
-            while (true)
-            {
-                try
-                {
-                    File.WriteAllText(path, _encryptJson(content));
-                    return true;
-                }
-                catch (IOException e) when (e.Message.Contains("because it is being used by another process"))
-                {
-                    // If some other process is using this file, retry operation unless elapsed times is greater than 10sec
-                    sw = sw ?? Stopwatch.StartNew();
-                    if (sw.ElapsedMilliseconds > 10000)
-                        return false;
-                }
-                catch (Exception)
-                {
-                    return false;
-                }
-            }
-        }
-
-        private class CommitAction
+        internal class CommitAction
         {
             public Action<bool, Exception> Ready { get; set; }
 

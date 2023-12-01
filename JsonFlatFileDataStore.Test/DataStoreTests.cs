@@ -1,11 +1,12 @@
-﻿using Newtonsoft.Json.Linq;
-using NSubstitute;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Dynamic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Newtonsoft.Json.Linq;
+using NSubstitute;
 using Xunit;
 
 namespace JsonFlatFileDataStore.Test
@@ -97,7 +98,7 @@ namespace JsonFlatFileDataStore.Test
             var store2 = new DataStore(newFilePath);
 
             var collectionUppercase = store2.GetCollection<PrivateOwner>("PrivateOwner");
-            Assert.Equal(0, collectionUppercase.Count);
+            Assert.Equal(1, collectionUppercase.Count);
 
             var collectionLowercase = store2.GetCollection<PrivateOwner>("privateOwner");
             Assert.Equal(1, collectionLowercase.Count);
@@ -194,8 +195,8 @@ namespace JsonFlatFileDataStore.Test
             var dynamicCollection = store.GetCollection("user");
 
             var userDynamic = dynamicCollection
-                                .AsQueryable()
-                                .Single(p => p.name == "Phil");
+                              .AsQueryable()
+                              .Single(p => p.name == "Phil");
 
             await dynamicCollection.InsertOneAsync(new { id = 14, name = "Raymond", age = 32 });
             await dynamicCollection.ReplaceOneAsync(e => e.id == 14, new { id = 14, name = "Barry", age = 32 });
@@ -204,8 +205,8 @@ namespace JsonFlatFileDataStore.Test
             var typedCollection = store.GetCollection<User>();
 
             var userTyped = typedCollection
-                                .AsQueryable()
-                                .Single(p => p.Name == "Phil");
+                            .AsQueryable()
+                            .Single(p => p.Name == "Phil");
 
             typedCollection.InsertOne(new User { Id = 15, Name = "Jim", Age = 52 });
             typedCollection.ReplaceOne(e => e.Id == 15, new User { Id = 15, Name = "Barry", Age = 52 });
@@ -464,14 +465,14 @@ namespace JsonFlatFileDataStore.Test
             var storeFileNotFound = new DataStore(path);
             var collectionKeys = storeFileNotFound.GetKeys();
             Assert.Equal(0, collectionKeys.Count);
-            
+
             var storeFileFound = new DataStore(path);
             var collectionKeysFileFound = storeFileNotFound.GetKeys();
             Assert.Equal(0, collectionKeysFileFound.Count);
 
             UTHelpers.Down(path);
         }
-        
+
         [Theory]
         [InlineData(true)]
         [InlineData(false)]
@@ -481,10 +482,10 @@ namespace JsonFlatFileDataStore.Test
 
             var store = new DataStore(path, useLowerCamelCase: useLowerCamelCase);
             var collection = store.GetCollection<Movie>("movie");
-            await collection.InsertOneAsync(new Movie{Name = "Test", Rating = 5});
+            await collection.InsertOneAsync(new Movie { Name = "Test", Rating = 5 });
 
             var content = UTHelpers.GetFileContent(path);
-            
+
 
             // NOTE: File format is different depending on used OS. Windows uses \r\n and Linux \r
             //   - "{\r\n  \"movie\": [\r\n    {\r\n      \"name\": \"Test\",\r\n      \"rating\": 5.0\r\n    }\r\n  ]\r\n}",
@@ -493,7 +494,7 @@ namespace JsonFlatFileDataStore.Test
             var allowedLengths = new[] { 81, 74 };
 
             Assert.Contains(allowedLengths, i => i == content.Length);
-            
+
 
             UTHelpers.Down(path);
         }
@@ -545,7 +546,7 @@ namespace JsonFlatFileDataStore.Test
         {
             var path = UTHelpers.GetFullFilePath($"CreateNewFile_Encrypted_{DateTime.UtcNow.Ticks}");
 
-            var storeFileNotFound = new DataStore(path, encryptionKey:"53cr3t");
+            var storeFileNotFound = new DataStore(path, encryptionKey: "53cr3t");
             var collectionKeys = storeFileNotFound.GetKeys();
             Assert.Equal(0, collectionKeys.Count);
 
@@ -554,6 +555,70 @@ namespace JsonFlatFileDataStore.Test
             Assert.Equal(0, collectionKeysFileFound.Count);
 
             UTHelpers.Down(path);
+        }
+        
+        [Fact]
+        public void File_Has_Correct_PropertyNames_DynamicCollection()
+        {
+            var path = UTHelpers.GetFullFilePath($"CreateNewFile_{DateTime.UtcNow.Ticks}");
+
+            var store = new DataStore(path);
+
+            var collection = store.GetCollection("User");
+            collection.InsertOne(new { id = 1, name = "Test" });
+            var collection2 = store.GetCollection("User");
+            collection2.InsertOne(new { id = 2, name = "Test2" });
+            var collection3 = store.GetCollection("user");
+            collection3.InsertOne(new { id = 3, name = "Test3" });
+
+            var content = UTHelpers.GetFileContent(path);
+            var propCountLower = Regex.Matches(content, "user").Count;
+            Assert.Equal(1, propCountLower);
+            var propCountUpper = Regex.Matches(content, "User").Count;
+            Assert.Equal(0, propCountUpper);
+
+            var assertCollection = store.GetCollection("user");
+            Assert.Equal(3, assertCollection.Count);
+        }
+
+        [Fact]
+        public void File_Has_Correct_PropertyNames_TypedCollection()
+        {
+            var path = UTHelpers.GetFullFilePath($"CreateNewFile_{DateTime.UtcNow.Ticks}");
+
+            var store = new DataStore(path);
+
+            var collection = store.GetCollection<Employee>();
+            collection.InsertOne(new Employee { Id = 1, Name = "first" });
+            var collection2 = store.GetCollection("Employee");
+            collection2.InsertOne(new Employee { Id = 2, Name = "second" });
+            var collection3 = store.GetCollection("employee");
+            collection3.InsertOne(new Employee { Id = 3, Name = "third" });
+
+            var content = UTHelpers.GetFileContent(path);
+            var propCountLower = Regex.Matches(content, "employee").Count;
+            Assert.Equal(1, propCountLower);
+            var propCountUpper = Regex.Matches(content, "Employee").Count;
+            Assert.Equal(0, propCountUpper);
+
+            var assertCollection = store.GetCollection<Employee>();
+            Assert.Equal(3, assertCollection.Count);
+        }
+        
+        [Fact]
+        public void File_Has_Correct_PropertyNames_Single_Item()
+        {
+            var path = UTHelpers.GetFullFilePath($"CreateNewFile_{DateTime.UtcNow.Ticks}");
+
+            var store = new DataStore(path);
+
+            store.ReplaceItem("TestOkIsThis1", 1, true);
+            store.ReplaceItem("TestOkIsThis2", 2, true);
+            store.ReplaceItem("TestOkIsThis2", 3, true);
+
+            var content = UTHelpers.GetFileContent(path);
+            var propCount = Regex.Matches(content, "testOkIsThis2").Count;
+            Assert.Equal(1, propCount);
         }
 
         public class Employee

@@ -25,7 +25,9 @@ namespace JsonFlatFileDataStore.Test
 
             WeakReference storeRef = null;
 
+#pragma warning disable CS4014
             Task.Run(() => RunDataStore(out storeRef, newFilePath, itemCount, useDispose));
+#pragma warning restore CS4014
 
             var store = new DataStore(newFilePath, reloadBeforeGetCollection: true);
 
@@ -66,9 +68,9 @@ namespace JsonFlatFileDataStore.Test
             var collection = store.GetCollection("random");
 
             var tasks = Enumerable.Range(0, count)
-             .AsParallel()
-             .Select(i => collection.InsertOneAsync(new User { Id = i, Name = $"Teddy_{i}" }))
-             .ToList();
+                                  .AsParallel()
+                                  .Select(i => collection.InsertOneAsync(new User { Id = i, Name = $"Teddy_{i}" }))
+                                  .ToList();
 
             if (dispose)
                 store.Dispose();

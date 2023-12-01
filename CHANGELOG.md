@@ -1,6 +1,15 @@
 # Changelog
 
 ### [Unreleased]
+
+### [2.4.2] - 2023-06-25
+* FIXED: Duplicate collection data to JSON on save when configured case was not used with collection name
+* FIXED: Duplicate single item data to JSON on save when configured case was not used with item name
+
+### [2.4.1] - 2023-01-15
+* FIXED: Ignore OperationCanceledException during dispose
+
+### [2.4.0] - 2022-12-26
 * FIXED: Initial encrypted file creation if file doesn't exist
 * ADDED: Output of the file can be minified
 * FIXED: Always minify output when encryption is used
